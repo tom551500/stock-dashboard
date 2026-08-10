@@ -270,15 +270,10 @@ def get_eps_value(eps_df, year, quarter):
 # ==========================================
 # 3. Token 設定
 # ==========================================
-# 【已修改】優先從 st.secrets 讀取（部署到 Streamlit Cloud 時使用）
-# 若本機測試沒有設定 secrets.toml，則退回下方預設值（僅供本機測試，正式部署前請改用 secrets）
-try:
-    api_token_str = st.secrets["FINMIND_TOKEN"]
-except Exception:
-    api_token_str = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoidG9tODg4NSIsImVtYWlsIjoidG9tNjQ2ZkBnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.MJL4mTzQEbYSavhBTYM3GCBstqGJThASMo9iTQbbCxQ'
+api_token_str = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoidG9tODg4NSIsImVtYWlsIjoidG9tNjQ2ZkBnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.MJL4mTzQEbYSavhBTYM3GCBstqGJThASMo9iTQbbCxQ'
 
-if not api_token_str or api_token_str == '您的_TOKEN':
-    st.error("⚠️ 尚未設定 FinMind Token！請於 Streamlit Cloud 後台 Secrets 新增 FINMIND_TOKEN。")
+if api_token_str == '您的_TOKEN':
+    st.error("⚠️ 尚未填寫 FinMind Token！")
     st.stop()
 
 stock_names_dict = load_stock_names(api_token_str)
