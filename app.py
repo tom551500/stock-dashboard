@@ -106,10 +106,18 @@ def load_local_database():
 
     try:
         tpex_url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_ex_dividend_right"
-        tpex_res = requests.get(tpex_url, timeout=10)
+        tpex_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+        }
+        tpex_res = requests.get(tpex_url, headers=tpex_headers, timeout=10)
         debug_msgs.append(f"TPEx status={tpex_res.status_code}")
         if tpex_res.status_code == 200:
-            tpex_json = tpex_res.json()
+            try:
+                tpex_json = tpex_res.json()
+            except Exception as je:
+                debug_msgs.append(f"TPEx JSON解析失敗: {je}，回應內容前100字: {tpex_res.text[:100]!r}")
+                tpex_json = []
             debug_msgs.append(f"TPEx rows={len(tpex_json) if isinstance(tpex_json, list) else 'not a list'}")
             tpex_df = pd.DataFrame(tpex_json)
             if not tpex_df.empty:
@@ -379,10 +387,6 @@ with st.sidebar:
     except Exception as e:
         upcoming_list = []
         debug_msgs = [f"整體流程發生例外: {e}"]
-
-    with st.expander("🔧 除錯資訊（近期除權息清單抓取狀況）"):
-        for m in debug_msgs:
-            st.caption(m)
 
     selected_option = st.selectbox("📅 近期除權息清單：", ["--- 請選擇或手動輸入 ---"] + upcoming_list)
     manual_input    = st.text_input("🔍 手動輸入代號 (例: 1904)", "")
