@@ -87,30 +87,40 @@ if not os.path.exists('all_taiwan_dividend_10years.csv'):
 @st.cache_data(ttl=3600)
 def load_local_database():
     df_list = []
+    debug_msgs = []
+
     try:
         twse_url = "https://openapi.twse.com.tw/v1/exchangeReport/TWT48U_ALL"
         twse_res = requests.get(twse_url, timeout=10)
+        debug_msgs.append(f"TWSE status={twse_res.status_code}")
         if twse_res.status_code == 200:
-            twse_df = pd.DataFrame(twse_res.json())
+            twse_json = twse_res.json()
+            debug_msgs.append(f"TWSE rows={len(twse_json) if isinstance(twse_json, list) else 'not a list'}")
+            twse_df = pd.DataFrame(twse_json)
             if not twse_df.empty:
+                debug_msgs.append(f"TWSE columns={list(twse_df.columns)}")
                 twse_df = twse_df.rename(columns={'Date': 'ExDate', 'Code': 'stock_id'})
                 df_list.append(twse_df)
-    except:
-        pass
+    except Exception as e:
+        debug_msgs.append(f"TWSE error: {e}")
 
     try:
         tpex_url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_ex_dividend_right"
         tpex_res = requests.get(tpex_url, timeout=10)
+        debug_msgs.append(f"TPEx status={tpex_res.status_code}")
         if tpex_res.status_code == 200:
-            tpex_df = pd.DataFrame(tpex_res.json())
+            tpex_json = tpex_res.json()
+            debug_msgs.append(f"TPEx rows={len(tpex_json) if isinstance(tpex_json, list) else 'not a list'}")
+            tpex_df = pd.DataFrame(tpex_json)
             if not tpex_df.empty:
+                debug_msgs.append(f"TPEx columns={list(tpex_df.columns)}")
                 tpex_df = tpex_df.rename(columns={'Ex_Dividend_Date': 'ExDate', 'Securities_Company_Code': 'stock_id'})
                 df_list.append(tpex_df)
-    except:
-        pass
+    except Exception as e:
+        debug_msgs.append(f"TPEx error: {e}")
 
     if not df_list:
-        return pd.DataFrame(columns=['CashExDividendTradingDate', 'stock_id'])
+        return pd.DataFrame(columns=['CashExDividendTradingDate', 'stock_id']), debug_msgs
         
     df_live = pd.concat(df_list, ignore_index=True)
     
@@ -127,7 +137,8 @@ def load_local_database():
 
     df_live['CashExDividendTradingDate'] = df_live['ExDate'].apply(parse_roc_date)
     df_live['stock_id'] = df_live['stock_id'].astype(str).str.strip()
-    return df_live
+    debug_msgs.append(f"合併後總筆數={len(df_live)}，日期解析成功筆數={df_live['CashExDividendTradingDate'].notna().sum()}")
+    return df_live, debug_msgs
 
 @st.cache_data(ttl=86400)
 def load_stock_names(api_token):
@@ -140,23 +151,65 @@ def load_stock_names(api_token):
     except:
         return {}
 
-@st.cache_data(ttl=86400)
+@st.cache_data(ttl=3600 * 12)
 def get_stock_futures():
+    """
+    抓取台灣期交所「股票期貨標的」清單，回傳有股票期貨的4碼股票代號清單。
+    邏輯移植自 top50_futures_spread_app.py 裡驗證過可用的 get_stock_futures_mapping()：
+    改用尋找「商品代碼」欄位來定位正確的表格，比單純找「代號」欄位更準確
+    （期交所頁面裡很多表格欄位都含「代號」兩字，容易抓錯表）。
+    """
+    fallback = ['2330', '2317', '2454', '2603', '2308', '1319', '1904', '8299', '2881', '2882']
+    TAIFEX_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-TW,zh;q=0.9",
+        "Referer": "https://www.taifex.com.tw/cht/2/stockLists",
+    }
+
     try:
-        headers = {'User-Agent': 'Mozilla/5.0'}
-        r = requests.get("https://www.taifex.com.tw/cht/2/stockLists", headers=headers, timeout=5)
-        r.encoding = 'utf-8'
-        dfs = pd.read_html(io.StringIO(r.text))
-        futures_set = set()
-        for df in dfs:
-            for col in df.columns:
-                if '代號' in str(col):
-                    for item in df[col]:
-                        c = str(item).split('.')[0].strip()
-                        if c.isdigit() and len(c) == 4: futures_set.add(c)
-        return list(futures_set) if futures_set else ['2330','2317','2454','2603','2308','1319','1904']
-    except:
-        return ['2330','2317','2454','2603','2308','1319','1904','8299','2881','2882']
+        resp = requests.get("https://www.taifex.com.tw/cht/2/stockLists", headers=TAIFEX_HEADERS, timeout=20)
+        resp.raise_for_status()
+        resp.encoding = resp.apparent_encoding or "utf-8"
+    except Exception as e:
+        return fallback, f"TAIFEX連線失敗({type(e).__name__}: {e})，改用內建10檔預設清單（不含2520/2540等小型股）"
+
+    try:
+        tables = pd.read_html(io.StringIO(resp.text))
+    except Exception as e:
+        return fallback, f"TAIFEX表格解析失敗({type(e).__name__}: {e})，可能缺少lxml套件，改用內建10檔預設清單"
+
+    if not tables:
+        return fallback, f"TAIFEX有回應(HTTP {resp.status_code})但頁面裡沒有偵測到任何表格，改用內建10檔預設清單"
+
+    target = None
+    for t in tables:
+        cols = [str(c) for c in t.columns]
+        if any("商品代碼" in c for c in cols):
+            target = t
+            break
+
+    if target is None:
+        return fallback, f"抓到{len(tables)}張表但找不到含「商品代碼」的表，網站版面可能改了，改用內建10檔預設清單"
+
+    df = target.copy()
+    df.columns = [str(c) for c in df.columns]
+    sec_col = next((c for c in df.columns if "證券代號" in c or "股票代號" in c), None)
+
+    if sec_col is None:
+        return fallback, f"找到商品代碼表但沒有證券代號欄位，欄位有：{list(df.columns)}，改用內建10檔預設清單"
+
+    stock_ids = df[sec_col].astype(str).str.strip()
+    stock_ids = stock_ids[stock_ids.str.match(r'^\d{4}$', na=False)]
+    stock_ids = stock_ids[~stock_ids.str.startswith('00')]
+    futures_set = sorted(set(stock_ids.tolist()))
+
+    if futures_set:
+        return futures_set, f"TAIFEX抓取成功，共{len(futures_set)}檔有股票期貨的個股"
+    else:
+        return fallback, "表格解析完但篩選後是空清單，改用內建10檔預設清單"
 
 # ==========================================
 # 2-1. 【新增】基本面因子：月營收模組
@@ -270,10 +323,15 @@ def get_eps_value(eps_df, year, quarter):
 # ==========================================
 # 3. Token 設定
 # ==========================================
-api_token_str = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoidG9tODg4NSIsImVtYWlsIjoidG9tNjQ2ZkBnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.MJL4mTzQEbYSavhBTYM3GCBstqGJThASMo9iTQbbCxQ'
+# 【已修改】優先從 st.secrets 讀取（部署到 Streamlit Cloud 時使用）
+# 若本機測試沒有設定 secrets.toml，則退回下方預設值（僅供本機測試，正式部署前請改用 secrets）
+try:
+    api_token_str = st.secrets["FINMIND_TOKEN"]
+except Exception:
+    api_token_str = 'eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJ1c2VyX2lkIjoidG9tODg4NSIsImVtYWlsIjoidG9tNjQ2ZkBnbWFpbC5jb20iLCJ0b2tlbl92ZXJzaW9uIjowfQ.MJL4mTzQEbYSavhBTYM3GCBstqGJThASMo9iTQbbCxQ'
 
-if api_token_str == '您的_TOKEN':
-    st.error("⚠️ 尚未填寫 FinMind Token！")
+if not api_token_str or api_token_str == '您的_TOKEN':
+    st.error("⚠️ 尚未設定 FinMind Token！請於 Streamlit Cloud 後台 Secrets 新增 FINMIND_TOKEN。")
     st.stop()
 
 stock_names_dict = load_stock_names(api_token_str)
@@ -294,7 +352,7 @@ with st.sidebar:
     st.markdown("---")
 
     try:
-        dividend_db = load_local_database()
+        dividend_db, debug_msgs = load_local_database()
         df_local = dividend_db.copy()
         if 'ExRightTradingDate' in df_local.columns:
             df_local['ExRightTradingDate'] = pd.to_datetime(df_local['ExRightTradingDate'], errors='coerce')
@@ -307,14 +365,24 @@ with st.sidebar:
         next_days = today_norm + pd.Timedelta(days=60)
         
         upcoming_df = df_local[(df_local['ExDate'] >= today_norm) & (df_local['ExDate'] <= next_days)].copy()
-        if filter_futures:  upcoming_df = upcoming_df[upcoming_df['stock_id'].isin(get_stock_futures())]
+        if filter_futures:
+            futures_list, futures_debug = get_stock_futures()
+            upcoming_df = upcoming_df[upcoming_df['stock_id'].isin(futures_list)]
+            debug_msgs.append(futures_debug)
+            debug_msgs.append(f"股期代號範例(前10檔): {futures_list[:10]}")
         
         upcoming_df = upcoming_df[['ExDate', 'stock_id']].drop_duplicates().sort_values(['ExDate', 'stock_id'])
         upcoming_df['stock_name'] = upcoming_df['stock_id'].map(stock_names_dict).fillna("")
         upcoming_df['display_text'] = (upcoming_df['ExDate'].dt.strftime('%m/%d') + " | " + upcoming_df['stock_id'] + " " + upcoming_df['stock_name'])
         upcoming_list = upcoming_df['display_text'].tolist()
-    except:
+        debug_msgs.append(f"篩選後可顯示筆數={len(upcoming_list)}")
+    except Exception as e:
         upcoming_list = []
+        debug_msgs = [f"整體流程發生例外: {e}"]
+
+    with st.expander("🔧 除錯資訊（近期除權息清單抓取狀況）"):
+        for m in debug_msgs:
+            st.caption(m)
 
     selected_option = st.selectbox("📅 近期除權息清單：", ["--- 請選擇或手動輸入 ---"] + upcoming_list)
     manual_input    = st.text_input("🔍 手動輸入代號 (例: 1904)", "")
