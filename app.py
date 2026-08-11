@@ -374,49 +374,6 @@ def get_taiex_week_return(taiex_df, ex_date, lookback_days=5):
     return (end_price - start_price) / start_price * 100
 
 # ==========================================
-# 2-2. 【新增】總體面因子：大盤同步性 + 除息旺季
-# ==========================================
-@st.cache_data(ttl=3600)
-def load_taiex(token):
-    """抓取台股加權指數(TAIEX)歷史收盤價，用於計算除息週大盤同步性"""
-    try:
-        r = requests.get("https://api.finmindtrade.com/api/v4/data", params={
-            "dataset": "TaiwanStockTotalReturnIndex",
-            "data_id": "TAIEX",
-            "start_date": "2013-01-01",
-            "end_date": "2026-12-31",
-            "token": token
-        }, timeout=15)
-        df = pd.DataFrame(r.json().get("data", []))
-        if df.empty:
-            return pd.DataFrame()
-        df['date'] = pd.to_datetime(df['date'], errors='coerce')
-        price_col = 'price' if 'price' in df.columns else ('close' if 'close' in df.columns else None)
-        if price_col is None:
-            return pd.DataFrame()
-        df['close'] = pd.to_numeric(df[price_col], errors='coerce')
-        df = df.dropna(subset=['date', 'close']).sort_values('date').reset_index(drop=True)
-        return df[['date', 'close']]
-    except:
-        return pd.DataFrame()
-
-def get_taiex_week_return(taiex_df, ex_date, lookback_days=5):
-    """
-    計算除息日往前推 lookback_days 個交易日的大盤漲跌幅（%），
-    用來判斷除息當週大盤是偏多頭還是偏空頭/盤整。
-    """
-    if taiex_df is None or taiex_df.empty or pd.isna(ex_date):
-        return None
-    sub = taiex_df[taiex_df['date'] <= ex_date].tail(lookback_days + 1)
-    if len(sub) < lookback_days + 1:
-        return None
-    start_price = sub.iloc[0]['close']
-    end_price = sub.iloc[-1]['close']
-    if pd.isna(start_price) or start_price == 0:
-        return None
-    return (end_price - start_price) / start_price * 100
-
-# ==========================================
 # 3. Token 設定
 # ==========================================
 # 【已修改】優先從 st.secrets 讀取（部署到 Streamlit Cloud 時使用）
