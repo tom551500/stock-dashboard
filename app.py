@@ -329,6 +329,94 @@ def get_eps_value(eps_df, year, quarter):
     return row.iloc[0]['value']
 
 # ==========================================
+# 2-2. 【新增】總體面因子：大盤同步性 + 除息旺季效應
+# ==========================================
+@st.cache_data(ttl=3600)
+def load_taiex_index(token):
+    """
+    抓取加權報酬指數 (TAIEX Total Return Index) 歷史資料，作為大盤同步性分析的基準。
+    用報酬指數而非單純的加權指數，是因為報酬指數有把除權息還原計入，
+    走勢更能反映「大盤整體多空氛圍」，不受成分股除權息干擾。
+    """
+    try:
+        r = requests.get("https://api.finmindtrade.com/api/v4/data", params={
+            "dataset": "TaiwanStockTotalReturnIndex",
+            "data_id": "TAIEX",
+            "start_date": "2013-01-01",
+            "end_date": "2026-12-31",
+            "token": token
+        }, timeout=15)
+        df = pd.DataFrame(r.json().get("data", []))
+        if df.empty:
+            return pd.DataFrame()
+        df['date'] = pd.to_datetime(df.get('date'), errors='coerce')
+        price_col = 'price' if 'price' in df.columns else ('close' if 'close' in df.columns else None)
+        if price_col is None:
+            return pd.DataFrame()
+        df = df[['date', price_col]].rename(columns={price_col: 'taiex_close'})
+        df['taiex_close'] = pd.to_numeric(df['taiex_close'], errors='coerce')
+        df = df.dropna().sort_values('date').reset_index(drop=True)
+        return df
+    except:
+        return pd.DataFrame()
+
+def get_taiex_week_return(taiex_df, ex_date, lookback_days=5):
+    """計算『除息當週』大盤表現：除息日往前lookback_days個交易日到除息日當天的大盤漲跌幅%"""
+    if taiex_df is None or taiex_df.empty or pd.isna(ex_date):
+        return None
+    sub = taiex_df[taiex_df['date'] <= ex_date].tail(lookback_days + 1)
+    if len(sub) < 2:
+        return None
+    start_price = sub.iloc[0]['taiex_close']
+    end_price = sub.iloc[-1]['taiex_close']
+    if pd.isna(start_price) or pd.isna(end_price) or start_price == 0:
+        return None
+    return (end_price - start_price) / start_price * 100
+
+# ==========================================
+# 2-2. 【新增】總體面因子：大盤同步性 + 除息旺季
+# ==========================================
+@st.cache_data(ttl=3600)
+def load_taiex(token):
+    """抓取台股加權指數(TAIEX)歷史收盤價，用於計算除息週大盤同步性"""
+    try:
+        r = requests.get("https://api.finmindtrade.com/api/v4/data", params={
+            "dataset": "TaiwanStockTotalReturnIndex",
+            "data_id": "TAIEX",
+            "start_date": "2013-01-01",
+            "end_date": "2026-12-31",
+            "token": token
+        }, timeout=15)
+        df = pd.DataFrame(r.json().get("data", []))
+        if df.empty:
+            return pd.DataFrame()
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        price_col = 'price' if 'price' in df.columns else ('close' if 'close' in df.columns else None)
+        if price_col is None:
+            return pd.DataFrame()
+        df['close'] = pd.to_numeric(df[price_col], errors='coerce')
+        df = df.dropna(subset=['date', 'close']).sort_values('date').reset_index(drop=True)
+        return df[['date', 'close']]
+    except:
+        return pd.DataFrame()
+
+def get_taiex_week_return(taiex_df, ex_date, lookback_days=5):
+    """
+    計算除息日往前推 lookback_days 個交易日的大盤漲跌幅（%），
+    用來判斷除息當週大盤是偏多頭還是偏空頭/盤整。
+    """
+    if taiex_df is None or taiex_df.empty or pd.isna(ex_date):
+        return None
+    sub = taiex_df[taiex_df['date'] <= ex_date].tail(lookback_days + 1)
+    if len(sub) < lookback_days + 1:
+        return None
+    start_price = sub.iloc[0]['close']
+    end_price = sub.iloc[-1]['close']
+    if pd.isna(start_price) or start_price == 0:
+        return None
+    return (end_price - start_price) / start_price * 100
+
+# ==========================================
 # 3. Token 設定
 # ==========================================
 # 【已修改】優先從 st.secrets 讀取（部署到 Streamlit Cloud 時使用）
@@ -433,9 +521,10 @@ else:
             day_chg      = latest_close - latest_open
             day_chg_pct  = day_chg / latest_open * 100
 
-            # 【新增】載入月營收資料 + 季度EPS資料
+            # 【新增】載入月營收資料 + 季度EPS資料 + 大盤指數資料
             rev_df = load_monthly_revenue(target_stock_id, api_token_str)
             eps_df = load_quarterly_eps(target_stock_id, api_token_str)
+            taiex_df = load_taiex_index(api_token_str)
 
             my_div['TotalCashDividend']  = (pd.to_numeric(my_div.get('CashEarningsDistribution',  0), errors='coerce').fillna(0) + pd.to_numeric(my_div.get('CashStatutorySurplus',      0), errors='coerce').fillna(0))
             my_div['TotalStockDividend'] = (pd.to_numeric(my_div.get('StockEarningsDistribution', 0), errors='coerce').fillna(0) + pd.to_numeric(my_div.get('StockStatutorySurplus',      0), errors='coerce').fillna(0))
@@ -758,6 +847,7 @@ else:
             filled_days_list = []
             is_filled_list = []
             rev_yoy_before_list = []
+            taiex_week_ret_list = []
             
             for idx, row in merged.iterrows():
                 ex_date = row['ExDate']
@@ -786,9 +876,14 @@ else:
                 rev_snap = get_revenue_snapshot_before(rev_df, ex_date)
                 rev_yoy_before_list.append(rev_snap['yoy'] if rev_snap is not None else np.nan)
 
+                # 【新增】計算除息當週大盤表現
+                taiex_week_ret_list.append(get_taiex_week_return(taiex_df, ex_date))
+
             merged['is_filled'] = is_filled_list
             merged['filled_days'] = filled_days_list
             merged['rev_yoy_before'] = rev_yoy_before_list
+            merged['taiex_week_ret'] = taiex_week_ret_list
+            merged['is_peak_season'] = merged['ExDate'].dt.month.isin([7, 8, 9])
 
             # 組合報表輸出
             merged['year'] = merged['ExDate'].dt.year.astype(str)
@@ -804,6 +899,8 @@ else:
                     fill_status = "❌ 未填權息"
 
                 rev_yoy_disp = f"{row['rev_yoy_before']:+.1f}%" if not pd.isna(row['rev_yoy_before']) else "-"
+                taiex_wr_disp = f"{row['taiex_week_ret']:+.1f}%" if row['taiex_week_ret'] is not None and not pd.isna(row['taiex_week_ret']) else "-"
+                season_disp = "🔥旺季" if row['is_peak_season'] else "淡季"
                 
                 final_data.append({
                     '年度': row['year'], 
@@ -812,6 +909,8 @@ else:
                     '股票股利': f"{row['TotalStockDividend']:.2f}", 
                     '殖利率': f"{row['yield']:.2f}%{yield_flag}",
                     '除息前營收YoY': rev_yoy_disp,
+                    '除息當週大盤%': taiex_wr_disp,
+                    '季節': season_disp,
                     '填權息表現': fill_status,
                     '填權息天數': row['filled_days'],
                     '3天前': f"{row['pre_3']:+.2f}%", 
@@ -836,6 +935,8 @@ else:
                     '股票股利': f"平均 {avg_fill_days:.1f} 天", 
                     '殖利率': f"總計 {filled_cnt}/{total_cnt} 次",
                     '除息前營收YoY': '-',
+                    '除息當週大盤%': '-',
+                    '季節': '-',
                     '填權息表現': f"整體填權息勝率 {fill_win_rate:.1f}%",
                     '填權息天數': f"{avg_fill_days:.1f}天(平均)",
                     '3天前': '-', '2天前': '-', '1天前': '-', '開盤': '-', '收盤': '-'
@@ -906,6 +1007,77 @@ else:
                 """, unsafe_allow_html=True)
             else:
                 st.caption("⚠️ 月營收資料樣本不足（可能為新上市股或 FinMind 額度限制），暫無法進行營收關聯性分析。")
+
+            # ==========================================
+            # 6-3. 【新增】總體面關聯性分析：大盤同步性 + 除息旺季效應
+            # ==========================================
+            taiex_valid = merged.dropna(subset=['taiex_week_ret'])
+            if len(taiex_valid) >= 3:
+                bull_mask = taiex_valid['taiex_week_ret'] > 0
+                bear_mask = taiex_valid['taiex_week_ret'] <= 0
+                bull_cnt, bear_cnt = bull_mask.sum(), bear_mask.sum()
+                bull_rate = (taiex_valid.loc[bull_mask, 'is_filled'].mean() * 100) if bull_cnt > 0 else None
+                bear_rate = (taiex_valid.loc[bear_mask, 'is_filled'].mean() * 100) if bear_cnt > 0 else None
+
+                bull_txt = f"{bull_rate:.0f}% ({bull_cnt}次)" if bull_rate is not None else "無樣本"
+                bear_txt = f"{bear_rate:.0f}% ({bear_cnt}次)" if bear_rate is not None else "無樣本"
+
+                if bull_rate is not None and bear_rate is not None:
+                    mkt_diff = bull_rate - bear_rate
+                    if mkt_diff > 10:
+                        mkt_insight = f"除息當週大盤走勢對此股填權息有明顯正向影響（相差 {mkt_diff:+.0f} 個百分點），大盤同步性可能是比個股基本面更強的解釋變數。"
+                    elif mkt_diff < -10:
+                        mkt_insight = f"此股填權息表現與除息當週大盤走勢呈反向關係（相差 {mkt_diff:+.0f} 個百分點），較不受大盤氛圍主導，個股本身籌碼或基本面可能是更關鍵的因素。"
+                    else:
+                        mkt_insight = "此股填權息表現與除息當週大盤走勢的關聯性不明顯。"
+                else:
+                    mkt_insight = "樣本數不足以判斷關聯性，僅供參考。"
+
+                st.markdown(f"""
+                <div style="background:#f7f9fc;padding:14px 18px;border-radius:10px;border:1px solid rgba(128,128,128,0.15);margin-top:12px;">
+                    <div style="font-size:14px;font-weight:700;color:#222;margin-bottom:8px">🌐 總體面關聯性分析 — 大盤同步性 vs 填權息成功率</div>
+                    <div style="display:flex;gap:24px;margin-bottom:8px;flex-wrap:wrap;">
+                        <span style="font-size:13px;color:#666">除息當週大盤上漲時填權息成功率：<b style="color:#ef5350">{bull_txt}</b></span>
+                        <span style="font-size:13px;color:#666">除息當週大盤下跌時填權息成功率：<b style="color:#26a69a">{bear_txt}</b></span>
+                    </div>
+                    <div style="font-size:12.5px;color:#888;line-height:1.5;">💡 {mkt_insight}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.caption("⚠️ 大盤指數資料樣本不足，暫無法進行大盤同步性分析。")
+
+            season_valid = merged.copy()
+            if len(season_valid) >= 3:
+                peak_mask = season_valid['is_peak_season'] == True
+                offpeak_mask = season_valid['is_peak_season'] == False
+                peak_cnt, offpeak_cnt = peak_mask.sum(), offpeak_mask.sum()
+                peak_rate = (season_valid.loc[peak_mask, 'is_filled'].mean() * 100) if peak_cnt > 0 else None
+                offpeak_rate = (season_valid.loc[offpeak_mask, 'is_filled'].mean() * 100) if offpeak_cnt > 0 else None
+
+                peak_txt = f"{peak_rate:.0f}% ({peak_cnt}次)" if peak_rate is not None else "無樣本"
+                offpeak_txt = f"{offpeak_rate:.0f}% ({offpeak_cnt}次)" if offpeak_rate is not None else "無樣本"
+
+                if peak_rate is not None and offpeak_rate is not None:
+                    season_diff = peak_rate - offpeak_rate
+                    if season_diff > 10:
+                        season_insight = f"7-9月除息旺季的填權息成功率明顯較高（相差 {season_diff:+.0f} 個百分點），可能與除息旺季資金集中回補、族群同步性效應有關。"
+                    elif season_diff < -10:
+                        season_insight = f"7-9月除息旺季的填權息成功率反而較低（相差 {season_diff:+.0f} 個百分點），旺季籌碼分散、資金排擠效應可能是原因之一。"
+                    else:
+                        season_insight = "旺季與非旺季的填權息成功率差異不明顯，此股的填權息表現較不受除息旺季效應影響。"
+                else:
+                    season_insight = "樣本數不足以判斷季節性效應，僅供參考。"
+
+                st.markdown(f"""
+                <div style="background:#f7f9fc;padding:14px 18px;border-radius:10px;border:1px solid rgba(128,128,128,0.15);margin-top:12px;">
+                    <div style="font-size:14px;font-weight:700;color:#222;margin-bottom:8px">📅 除息旺季效應 — 7-9月 vs 其他月份填權息成功率</div>
+                    <div style="display:flex;gap:24px;margin-bottom:8px;flex-wrap:wrap;">
+                        <span style="font-size:13px;color:#666">🔥 旺季(7-9月)填權息成功率：<b style="color:#ef5350">{peak_txt}</b></span>
+                        <span style="font-size:13px;color:#666">其他月份填權息成功率：<b style="color:#26a69a">{offpeak_txt}</b></span>
+                    </div>
+                    <div style="font-size:12.5px;color:#888;line-height:1.5;">💡 {season_insight}</div>
+                </div>
+                """, unsafe_allow_html=True)
 
         except Exception as e:
             st.error(f"資料處理或繪圖發生錯誤: {e}")
