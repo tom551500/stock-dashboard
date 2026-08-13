@@ -121,18 +121,52 @@ def load_local_database(token):
             'Accept': 'application/json',
         }
         tpex_res = requests.get(tpex_url, headers=tpex_headers, timeout=10)
-        debug_msgs.append(f"TPEx status={tpex_res.status_code}")
+        debug_msgs.append(f"TPEx(openapi) status={tpex_res.status_code}")
+        tpex_ok = False
         if tpex_res.status_code == 200:
             try:
                 tpex_json = tpex_res.json()
             except Exception:
                 tpex_json = []
-                debug_msgs.append("TPEx回應不是有效JSON（可能被反機器人機制擋下），此次跳過上櫃股資料")
-            debug_msgs.append(f"TPEx rows={len(tpex_json) if isinstance(tpex_json, list) else 'not a list'}")
+                debug_msgs.append("TPEx(openapi) 回應不是有效JSON（可能被反機器人機制擋下）")
+            debug_msgs.append(f"TPEx(openapi) rows={len(tpex_json) if isinstance(tpex_json, list) else 'not a list'}")
             tpex_df = pd.DataFrame(tpex_json)
             if not tpex_df.empty:
                 tpex_df = tpex_df.rename(columns={'Ex_Dividend_Date': 'ExDate', 'Securities_Company_Code': 'stock_id'})
                 df_list.append(tpex_df[['ExDate', 'stock_id']])
+                tpex_ok = True
+
+        if not tpex_ok:
+            # 備援：改抓 TPEx 舊版網頁（給人瀏覽用，路徑跟被擋的 openapi 不同，值得一試）
+            try:
+                legacy_url = "https://www.tpex.org.tw/web/stock/exright/preAnnounce/PrePost.php?l=zh-tw"
+                legacy_headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                    'Referer': 'https://www.tpex.org.tw/',
+                }
+                legacy_res = requests.get(legacy_url, headers=legacy_headers, timeout=10)
+                legacy_res.encoding = legacy_res.apparent_encoding or 'utf-8'
+                debug_msgs.append(f"TPEx(舊版網頁) status={legacy_res.status_code}")
+                tables = pd.read_html(io.StringIO(legacy_res.text))
+                target = None
+                for t in tables:
+                    cols = [str(c) for c in t.columns]
+                    if any('代號' in c for c in cols) and any('除權息' in c or '日期' in c for c in cols):
+                        target = t
+                        break
+                if target is not None:
+                    date_col = next((c for c in target.columns if '日期' in str(c)), None)
+                    id_col = next((c for c in target.columns if '代號' in str(c)), None)
+                    if date_col and id_col:
+                        legacy_df = target[[date_col, id_col]].rename(columns={date_col: 'ExDate', id_col: 'stock_id'})
+                        df_list.append(legacy_df)
+                        debug_msgs.append(f"TPEx(舊版網頁) 解析成功，共{len(legacy_df)}筆")
+                    else:
+                        debug_msgs.append(f"TPEx(舊版網頁) 找到表格但欄位對不到，欄位={list(target.columns)}")
+                else:
+                    debug_msgs.append(f"TPEx(舊版網頁) 抓到{len(tables)}張表但沒有符合的欄位，可能也被擋或改版")
+            except Exception as e:
+                debug_msgs.append(f"TPEx(舊版網頁) error: {type(e).__name__}: {e}")
     except Exception as e:
         debug_msgs.append(f"TPEx error: {e}")
 
