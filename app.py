@@ -385,10 +385,11 @@ with st.sidebar:
     st.markdown("### 🏆 近期除權息日程雷達")
     st.markdown("---")
 
+    debug_msgs = []
     try:
         dividend_db, debug_msgs = load_local_database(api_token_str)
         df_local = dividend_db.copy()
-        df_local['ExDate'] = df_local['CashExDividendTradingDate']
+        df_local['ExDate'] = pd.to_datetime(df_local['CashExDividendTradingDate'], errors='coerce')
         df_local = df_local.dropna(subset=['ExDate'])
         today_norm = pd.to_datetime('today').normalize()
         next_days = today_norm + pd.Timedelta(days=60)
@@ -407,7 +408,7 @@ with st.sidebar:
         debug_msgs.append(f"篩選後可顯示筆數={len(upcoming_list)}")
     except Exception as e:
         upcoming_list = []
-        debug_msgs = [f"整體流程發生例外: {e}"]
+        debug_msgs.append(f"整體流程發生例外: {type(e).__name__}: {e}")
 
     with st.expander("🔧 除錯資訊（近期除權息清單抓取狀況）"):
         for m in debug_msgs:
