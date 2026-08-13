@@ -147,6 +147,8 @@ def load_local_database(token):
                 legacy_res = requests.get(legacy_url, headers=legacy_headers, timeout=10)
                 legacy_res.encoding = legacy_res.apparent_encoding or 'utf-8'
                 debug_msgs.append(f"TPEx(舊版網頁) status={legacy_res.status_code}")
+                debug_msgs.append(f"TPEx(舊版網頁) 內容長度={len(legacy_res.text)}字元，含'<table'關鍵字={'<table' in legacy_res.text.lower()}")
+                debug_msgs.append(f"TPEx(舊版網頁) 內容前300字: {legacy_res.text[:300]!r}")
                 tables = pd.read_html(io.StringIO(legacy_res.text))
                 target = None
                 for t in tables:
