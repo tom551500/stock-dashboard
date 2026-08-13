@@ -433,6 +433,10 @@ with st.sidebar:
         upcoming_list = []
         debug_msgs = [f"整體流程發生例外: {e}"]
 
+    with st.expander("🔧 除錯資訊（近期除權息清單抓取狀況）"):
+        for m in debug_msgs:
+            st.caption(m)
+
     selected_option = st.selectbox("📅 近期除權息清單：", ["--- 請選擇或手動輸入 ---"] + upcoming_list)
     manual_input    = st.text_input("🔍 手動輸入代號 (例: 1904)", "")
 
