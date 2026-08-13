@@ -87,47 +87,77 @@ if not os.path.exists('all_taiwan_dividend_10years.csv'):
 @st.cache_data(ttl=3600)
 def load_local_database(token):
     """
-    改用 FinMind 的「股利政策表」(TaiwanStockDividend) 批次查詢，取代直接連線
-    TWSE/TPEx 官方網站。原因：TPEx 官網對雲端主機 IP 有反機器人防護，Streamlit Cloud
-    這類雲端環境常被擋下（回傳假的200狀態但內容是攔截頁面），造成上櫃股票資料抓不到；
-    FinMind 是統一的第三方資料源，同時涵蓋上市(TWSE)和上櫃(TPEx)，且本App其他功能
-    都已證實它在雲端運作穩定，不會被擋。
-
-    這裡故意抓「較寬的日期區間」(往前抓 200 天) 再讓外層自行篩選未來60天，
-    是因為現金股利公告日期跟實際除息日通常會差幾個月，用太窄的區間可能篩不到。
+    資料來源策略（經多輪實測後的結論）：
+    - TWSE 官方 OpenAPI：雲端主機可正常連線，穩定回傳上市股票的除權息預告資料。
+    - TPEx 官方 OpenAPI：對雲端/機房 IP 有反機器人防護，Streamlit Cloud 經常被擋
+      （回傳看似成功的200狀態，內容卻是攔截頁面），這是 TPEx 網站本身的限制。
+    - FinMind「股利政策表」：實測不支援「不指定股票、抓全市場」的批次查詢(回傳400)，
+      這條路行不通，只能保留逐股查詢，但那樣量太大不適合用在這個近期清單功能上。
+    因此目前採用 TWSE盡量抓 + TPEx盡力抓（抓不到就算了，不影響其他功能）的組合，
+    上櫃股偶爾在雲端環境會從這個下拉清單中缺席，這種情況請改用「手動輸入代號」查詢，
+    手動輸入是走 FinMind 個股查詢，不受此限制影響。
     """
+    df_list = []
     debug_msgs = []
-    today = pd.to_datetime('today').normalize()
-    query_start = (today - pd.Timedelta(days=200)).strftime('%Y-%m-%d')
-    query_end = (today + pd.Timedelta(days=60)).strftime('%Y-%m-%d')
 
     try:
-        r = requests.get("https://api.finmindtrade.com/api/v4/data", params={
-            "dataset": "TaiwanStockDividend",
-            "start_date": query_start,
-            "end_date": query_end,
-            "token": token
-        }, timeout=30)
-        debug_msgs.append(f"FinMind TaiwanStockDividend status={r.status_code}")
-        df = pd.DataFrame(r.json().get("data", []))
-        debug_msgs.append(f"FinMind 回傳筆數={len(df)}")
-        if df.empty:
-            return pd.DataFrame(columns=['CashExDividendTradingDate', 'stock_id']), debug_msgs
-
-        debug_msgs.append(f"FinMind 欄位={list(df.columns)}")
-        df['stock_id'] = df['stock_id'].astype(str).str.strip()
-        df['CashExDividendTradingDate'] = pd.to_datetime(df.get('CashExDividendTradingDate'), errors='coerce')
-        if 'ExRightTradingDate' in df.columns:
-            df['ExRightTradingDate'] = pd.to_datetime(df['ExRightTradingDate'], errors='coerce')
-            df['CashExDividendTradingDate'] = df['CashExDividendTradingDate'].fillna(df['ExRightTradingDate'])
-
-        df = df.dropna(subset=['CashExDividendTradingDate'])
-        df = df.drop_duplicates(subset=['stock_id', 'CashExDividendTradingDate'])
-        debug_msgs.append(f"日期解析成功筆數={len(df)}（涵蓋上市+上櫃，來源:FinMind）")
-        return df[['CashExDividendTradingDate', 'stock_id']], debug_msgs
+        twse_url = "https://openapi.twse.com.tw/v1/exchangeReport/TWT48U_ALL"
+        twse_res = requests.get(twse_url, timeout=10)
+        debug_msgs.append(f"TWSE status={twse_res.status_code}")
+        if twse_res.status_code == 200:
+            twse_json = twse_res.json()
+            debug_msgs.append(f"TWSE rows={len(twse_json) if isinstance(twse_json, list) else 'not a list'}")
+            twse_df = pd.DataFrame(twse_json)
+            if not twse_df.empty:
+                twse_df = twse_df.rename(columns={'Date': 'ExDate', 'Code': 'stock_id'})
+                df_list.append(twse_df[['ExDate', 'stock_id']])
     except Exception as e:
-        debug_msgs.append(f"FinMind error: {e}")
-        return pd.DataFrame(columns=['CashExDividendTradingDate', 'stock_id']), debug_msgs
+        debug_msgs.append(f"TWSE error: {e}")
+
+    try:
+        tpex_url = "https://www.tpex.org.tw/openapi/v1/tpex_mainboard_ex_dividend_right"
+        tpex_headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+        }
+        tpex_res = requests.get(tpex_url, headers=tpex_headers, timeout=10)
+        debug_msgs.append(f"TPEx status={tpex_res.status_code}")
+        if tpex_res.status_code == 200:
+            try:
+                tpex_json = tpex_res.json()
+            except Exception:
+                tpex_json = []
+                debug_msgs.append("TPEx回應不是有效JSON（可能被反機器人機制擋下），此次跳過上櫃股資料")
+            debug_msgs.append(f"TPEx rows={len(tpex_json) if isinstance(tpex_json, list) else 'not a list'}")
+            tpex_df = pd.DataFrame(tpex_json)
+            if not tpex_df.empty:
+                tpex_df = tpex_df.rename(columns={'Ex_Dividend_Date': 'ExDate', 'Securities_Company_Code': 'stock_id'})
+                df_list.append(tpex_df[['ExDate', 'stock_id']])
+    except Exception as e:
+        debug_msgs.append(f"TPEx error: {e}")
+
+    if not df_list:
+        empty = pd.DataFrame({'CashExDividendTradingDate': pd.Series(dtype='datetime64[ns]'),
+                               'stock_id': pd.Series(dtype='object')})
+        return empty, debug_msgs
+
+    df_live = pd.concat(df_list, ignore_index=True)
+
+    def parse_roc_date(date_str):
+        nums = re.sub(r'\D', '', str(date_str))
+        if len(nums) >= 7:
+            year = int(nums[:-4]) + 1911
+            month_day = nums[-4:]
+            try:
+                return pd.to_datetime(f"{year}{month_day}")
+            except Exception:
+                pass
+        return pd.NaT
+
+    df_live['CashExDividendTradingDate'] = df_live['ExDate'].apply(parse_roc_date)
+    df_live['stock_id'] = df_live['stock_id'].astype(str).str.strip()
+    debug_msgs.append(f"合併後總筆數={len(df_live)}，日期解析成功筆數={df_live['CashExDividendTradingDate'].notna().sum()}")
+    return df_live[['CashExDividendTradingDate', 'stock_id']], debug_msgs
 
 @st.cache_data(ttl=86400)
 def load_stock_names(api_token):
